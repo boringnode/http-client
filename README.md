@@ -1,0 +1,203 @@
+# @boringnode/http-client
+
+A small TypeScript HTTP client built on [Undici](https://undici.nodejs.org). It buffers normal
+responses so their connection can return to the pool, and keeps streaming explicit.
+
+## Installation
+
+```sh
+npm install @boringnode/http-client
+```
+
+## Why not use `fetch`?
+
+Node.js `fetch` is powered by Undici and remains the best choice for isolated requests or code that
+needs the Web Fetch API. This package uses Undici's lower-level dispatcher API to add application
+conventions without changing its global dispatcher.
+
+```ts
+const http = new HttpClient({
+  baseUrl: 'https://api.example.com',
+  headers: { authorization: `Bearer ${token}` },
+  timeout: 10_000,
+  maxResponseSize: 5 * 1024 * 1024,
+})
+
+const response = await http.get('/users', { query: { page: 1 } })
+response.throwIfFailed()
+const users = response.json<User[]>()
+```
+
+Compared with `fetch`, the package provides:
+
+- reusable client defaults for base URLs, headers, query parameters, and timeouts;
+- named clients through `HttpClientManager`;
+- immutable derived clients that share the same dispatcher;
+- buffered, repeatable response readers with a maximum body size;
+- explicit HTTP failure handling through `failed()` and `throwIfFailed()`;
+- an explicit streaming API with documented body ownership;
+- per-client dispatcher and connection settings with owned lifecycle management.
+
+`fetch` already pools connections through Undici, follows redirects, supports streaming, and works
+with `AbortSignal`. This package does not replace those capabilities. It gives them a reusable,
+typed client configuration and lifecycle for applications that make more than occasional requests.
+
+## Basic usage
+
+```ts
+import { HttpClient } from '@boringnode/http-client'
+
+const http = new HttpClient()
+
+const response = await http.get('https://example.com/users', {
+  query: { page: 1 },
+})
+
+response.throwIfFailed()
+const users = response.json<User[]>()
+
+await http.close()
+```
+
+HTTP 4xx and 5xx statuses remain normal responses. Network errors and timeouts reject the request.
+Call `throwIfFailed()` when a non-success status should throw.
+
+## Configured and named clients
+
+```ts
+import { HttpClientManager } from '@boringnode/http-client'
+
+const http = new HttpClientManager({
+  default: 'github',
+  clients: {
+    github: {
+      baseUrl: 'https://api.github.com',
+      headers: { authorization: `Bearer ${token}` },
+      query: { apiVersion: '2022-11-28' },
+      timeout: 10_000,
+      headersTimeout: 5_000,
+      bodyTimeout: 5_000,
+    },
+  },
+})
+
+const response = await http.use().get('/repos/adonisjs/core')
+response.throwIfFailed()
+const repository = response.json<Repository>()
+
+await http.close()
+```
+
+`use(name?)` creates each client on first use and caches it. The manager also forwards `request`,
+`get`, `post`, `put`, `patch`, `delete`, and `stream` to its default client.
+
+The generic request method takes the HTTP method first:
+
+```ts
+await http.request('OPTIONS', '/health')
+```
+
+## Request bodies
+
+Use `json` for JSON and `body` for strings, bytes, form data, or Node.js readable streams.
+
+```ts
+await http.use('github').post('/repos/boringnode/example/issues', {
+  json: { title: 'Connection failed' },
+})
+
+await http.use('github').put('/upload', {
+  body: Buffer.from('contents'),
+  headers: { 'content-type': 'application/octet-stream' },
+})
+```
+
+The buffered response API is synchronous after the request resolves:
+
+```ts
+response.status
+response.headers
+response.header('content-type')
+response.text()
+response.json()
+response.bytes()
+response.failed()
+response.throwIfFailed()
+```
+
+The default response limit is 10 MiB. Set `maxResponseSize` on a client or derived client to change
+it. An oversized response throws `errors.ResponseTooLargeError` and discards its connection.
+
+## Derived clients
+
+`withOptions` creates an immutable derived client. Headers and query values merge with the parent,
+and the derived client borrows the same dispatcher.
+
+```ts
+const authenticated = httpClient.withOptions({
+  headers: { authorization: `Bearer ${token}` },
+})
+
+await authenticated.get('/profile')
+```
+
+Closing a derived client does not close the shared dispatcher. Close its owning parent instead.
+
+When `baseUrl` is configured, default headers and query parameters apply only to requests on the
+same origin. Request-specific options still apply to any URL. This prevents credentials configured
+for one API from being sent to another origin.
+
+## Timeouts and redirects
+
+`timeout` limits the total request duration. `headersTimeout` limits the time spent waiting for
+complete response headers, and `bodyTimeout` limits inactivity between body chunks. Set any timeout
+to `0` to disable it.
+
+```ts
+const http = new HttpClient({
+  timeout: 30_000,
+  headersTimeout: 10_000,
+  bodyTimeout: 10_000,
+})
+```
+
+The client follows up to five redirects by default. Set `maxRedirects` on the client or a request to
+change the limit, or set it to `0` to receive redirect responses unchanged. Undici removes
+`authorization`, `cookie`, and `proxy-authorization` when a redirect changes origin.
+
+## Streaming
+
+`stream` skips the response limit and returns Undici's readable body. The caller owns that body and
+must consume, dump, or destroy it so the connection can be reused.
+
+```ts
+const response = await httpClient.stream('/archive')
+
+for await (const chunk of response.body) {
+  process.stdout.write(chunk)
+}
+```
+
+Pass `method` and the normal request options when streaming a non-GET request.
+
+## Dispatchers and lifecycle
+
+Each client creates one long-lived Undici `Agent` by default. The package never changes Undici's
+global dispatcher and never creates a dispatcher per request.
+
+```ts
+import { Agent } from 'undici'
+
+const borrowed = new HttpClient({ dispatcher: existingDispatcher })
+
+const owned = new HttpClient({
+  dispatcher: () => new Agent({ connections: 4 }),
+})
+```
+
+A dispatcher instance is borrowed. `close()` and `destroy()` leave it open. A dispatcher returned by
+a factory is owned and closed by the client. The default Agent is owned too. `close()` drains active
+requests, while `destroy()` aborts them.
+
+The `transport` option exposes common Agent connection settings. Inject a dispatcher for more
+specialized Undici setups.
