@@ -1,11 +1,18 @@
 import { Agent, interceptors, type Dispatcher } from 'undici'
 import { ResponseTooLargeError } from './exceptions.js'
+import type {
+  ClientErrorBody,
+  ClientPath,
+  ClientRequestArguments,
+  ClientSuccessBody,
+} from './openapi.js'
 import { HttpResponse, HttpStreamResponse } from './response.js'
 import type {
   Headers,
   HttpClientOptions,
   HttpMethod,
   Query,
+  PathParameters,
   RequestOptions,
   StreamRequestOptions,
 } from './types/main.js'
@@ -19,7 +26,7 @@ interface DispatcherReference {
 }
 
 /** A reusable HTTP client backed by one long-lived Undici dispatcher. */
-export class HttpClient {
+export class HttpClient<Api = never> {
   readonly #options: Omit<HttpClientOptions, 'dispatcher' | 'transport'>
   readonly #dispatcher: DispatcherReference
   readonly #redirectDispatchers = new Map<number, Dispatcher>()
@@ -38,8 +45,8 @@ export class HttpClient {
   }
 
   /** Create a client with merged defaults that borrows this client's dispatcher. */
-  withOptions(options: Omit<HttpClientOptions, 'dispatcher' | 'transport'>): HttpClient {
-    const client = new HttpClient({
+  withOptions(options: Omit<HttpClientOptions, 'dispatcher' | 'transport'>): HttpClient<Api> {
+    const client = new HttpClient<Api>({
       ...this.#options,
       ...options,
       headers: mergeHeaders(this.#options.headers, options.headers),
@@ -50,12 +57,15 @@ export class HttpClient {
     return client
   }
 
-  async request(
-    method: HttpMethod,
-    path: string | URL,
-    options: RequestOptions = {}
-  ): Promise<HttpResponse> {
-    const response = await this.#dispatch(method, path, options)
+  async request<Method extends HttpMethod, Path extends ClientPath<Api, Method>>(
+    method: Method,
+    path: Path,
+    ...options: ClientRequestArguments<Api, Method, Path>
+  ): Promise<
+    HttpResponse<ClientSuccessBody<Api, Method, Path>, ClientErrorBody<Api, Method, Path>>
+  > {
+    const requestOptions = (options[0] ?? {}) as RequestOptions
+    const response = await this.#dispatch(method, path, requestOptions)
     const chunks: Uint8Array[] = []
     const limit = this.#options.maxResponseSize ?? DEFAULT_MAX_RESPONSE_SIZE
     let size = 0
@@ -76,31 +86,55 @@ export class HttpClient {
       throw error
     }
 
-    return new HttpResponse({
+    return new HttpResponse<
+      ClientSuccessBody<Api, Method, Path>,
+      ClientErrorBody<Api, Method, Path>
+    >({
       status: response.statusCode,
       headers: response.headers,
       body: Buffer.concat(chunks, size),
     })
   }
 
-  get(path: string | URL, options?: RequestOptions): Promise<HttpResponse> {
-    return this.request('GET', path, options)
+  async get<Path extends ClientPath<Api, 'GET'>>(
+    path: Path,
+    ...options: ClientRequestArguments<Api, 'GET', Path>
+  ): Promise<HttpResponse<ClientSuccessBody<Api, 'GET', Path>, ClientErrorBody<Api, 'GET', Path>>> {
+    return this.request('GET', path, ...options)
   }
 
-  post(path: string | URL, options?: RequestOptions): Promise<HttpResponse> {
-    return this.request('POST', path, options)
+  async post<Path extends ClientPath<Api, 'POST'>>(
+    path: Path,
+    ...options: ClientRequestArguments<Api, 'POST', Path>
+  ): Promise<
+    HttpResponse<ClientSuccessBody<Api, 'POST', Path>, ClientErrorBody<Api, 'POST', Path>>
+  > {
+    return this.request('POST', path, ...options)
   }
 
-  put(path: string | URL, options?: RequestOptions): Promise<HttpResponse> {
-    return this.request('PUT', path, options)
+  async put<Path extends ClientPath<Api, 'PUT'>>(
+    path: Path,
+    ...options: ClientRequestArguments<Api, 'PUT', Path>
+  ): Promise<HttpResponse<ClientSuccessBody<Api, 'PUT', Path>, ClientErrorBody<Api, 'PUT', Path>>> {
+    return this.request('PUT', path, ...options)
   }
 
-  patch(path: string | URL, options?: RequestOptions): Promise<HttpResponse> {
-    return this.request('PATCH', path, options)
+  async patch<Path extends ClientPath<Api, 'PATCH'>>(
+    path: Path,
+    ...options: ClientRequestArguments<Api, 'PATCH', Path>
+  ): Promise<
+    HttpResponse<ClientSuccessBody<Api, 'PATCH', Path>, ClientErrorBody<Api, 'PATCH', Path>>
+  > {
+    return this.request('PATCH', path, ...options)
   }
 
-  delete(path: string | URL, options?: RequestOptions): Promise<HttpResponse> {
-    return this.request('DELETE', path, options)
+  async delete<Path extends ClientPath<Api, 'DELETE'>>(
+    path: Path,
+    ...options: ClientRequestArguments<Api, 'DELETE', Path>
+  ): Promise<
+    HttpResponse<ClientSuccessBody<Api, 'DELETE', Path>, ClientErrorBody<Api, 'DELETE', Path>>
+  > {
+    return this.request('DELETE', path, ...options)
   }
 
   /** Return an unconsumed body. The caller must consume, dump, or destroy it. */
@@ -134,7 +168,7 @@ export class HttpClient {
   }
 
   async #dispatch(method: HttpMethod, path: string | URL, options: RequestOptions) {
-    const url = resolveUrl(path, this.#options.baseUrl)
+    const url = resolveUrl(interpolatePath(path, options.params), this.#options.baseUrl)
     const applyDefaults = isWithinBaseOrigin(url, this.#options.baseUrl)
     const query = { ...(applyDefaults ? this.#options.query : {}), ...options.query }
     appendQuery(url, query)
@@ -225,6 +259,21 @@ function resolveUrl(path: string | URL, baseUrl?: string | URL): URL {
   } catch {
     throw new TypeError(`Cannot resolve relative URL "${path}" without a baseUrl`)
   }
+}
+
+function interpolatePath(path: string | URL, params: PathParameters = {}): string | URL {
+  if (path instanceof URL) {
+    return path
+  }
+
+  return path.replace(/\{([^}]+)\}/g, (_, name: string) => {
+    const value = params[name]
+    if (value === undefined) {
+      throw new TypeError(`Missing value for URL parameter "${name}"`)
+    }
+
+    return encodeURIComponent(String(value))
+  })
 }
 
 function isWithinBaseOrigin(url: URL, baseUrl?: string | URL): boolean {

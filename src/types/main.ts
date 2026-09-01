@@ -11,6 +11,7 @@ export type Headers = Record<string, HeaderValue>
 export type QueryPrimitive = string | number | boolean
 export type QueryValue = QueryPrimitive | readonly QueryPrimitive[] | null | undefined
 export type Query = Record<string, QueryValue>
+export type PathParameters = Record<string, string | number | boolean>
 
 export type RawBody = string | Buffer | Uint8Array | Readable | FormData | null
 
@@ -53,6 +54,7 @@ export interface HttpClientOptions {
 }
 
 interface SharedRequestOptions {
+  params?: PathParameters
   headers?: Headers
   query?: Query
   timeout?: number
@@ -67,7 +69,10 @@ export type RequestOptions = SharedRequestOptions &
 
 export type StreamRequestOptions = RequestOptions & { method?: HttpMethod }
 
-export interface HttpClientManagerOptions<KnownClients extends Record<string, HttpClientOptions>> {
-  default?: keyof KnownClients
+export interface HttpClientManagerOptions<
+  KnownClients extends Record<string, HttpClientOptions>,
+  DefaultClient extends keyof KnownClients = keyof KnownClients,
+> {
+  default?: DefaultClient
   clients: KnownClients
 }

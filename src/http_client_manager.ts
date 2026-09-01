@@ -1,27 +1,38 @@
 import { HttpClient } from './http_client.js'
+import type { ClientPath, ClientRequestArguments, InferClientApi } from './openapi.js'
 import type {
   HttpClientManagerOptions,
   HttpClientOptions,
   HttpMethod,
-  RequestOptions,
   StreamRequestOptions,
 } from './types/main.js'
 
-/** Lazily creates and caches named HTTP clients. */
-export class HttpClientManager<KnownClients extends Record<string, HttpClientOptions>> {
-  readonly #config: HttpClientManagerOptions<KnownClients>
-  #clients: Partial<Record<keyof KnownClients, HttpClient>> = {}
+type ManagedClients<KnownClients extends Record<string, HttpClientOptions>> = {
+  [ClientName in keyof KnownClients]: HttpClient<InferClientApi<KnownClients[ClientName]>>
+}
 
-  constructor(config: HttpClientManagerOptions<KnownClients>) {
+/** Lazily creates and caches named HTTP clients. */
+export class HttpClientManager<
+  KnownClients extends Record<string, HttpClientOptions>,
+  DefaultClient extends keyof KnownClients = keyof KnownClients,
+> {
+  readonly #config: HttpClientManagerOptions<KnownClients, DefaultClient>
+  #clients: Partial<ManagedClients<KnownClients>> = {}
+
+  constructor(config: HttpClientManagerOptions<KnownClients, DefaultClient>) {
     this.#config = config
   }
 
-  use<ClientName extends keyof KnownClients>(name?: ClientName): HttpClient {
-    const clientName: keyof KnownClients | undefined = name || this.#config.default
+  use<ClientName extends keyof KnownClients = DefaultClient>(
+    name?: ClientName
+  ): ManagedClients<KnownClients>[ClientName] {
+    const selectedName: keyof KnownClients | undefined = name || this.#config.default
 
-    if (!clientName) {
+    if (!selectedName) {
       throw new Error('Cannot create HTTP client. No default client is defined in the config')
     }
+
+    const clientName = selectedName as ClientName
 
     const cached = this.#clients[clientName]
     if (cached) {
@@ -32,33 +43,57 @@ export class HttpClientManager<KnownClients extends Record<string, HttpClientOpt
       throw new Error(`Cannot create HTTP client. Client "${String(clientName)}" is not defined`)
     }
 
-    const client = new HttpClient(this.#config.clients[clientName])
+    const client = new HttpClient<InferClientApi<KnownClients[typeof clientName]>>(
+      this.#config.clients[clientName]
+    )
     this.#clients[clientName] = client
     return client
   }
 
-  request(method: HttpMethod, path: string | URL, options?: RequestOptions) {
-    return this.use().request(method, path, options)
+  request<
+    Method extends HttpMethod,
+    Path extends ClientPath<InferClientApi<KnownClients[DefaultClient]>, Method>,
+  >(
+    method: Method,
+    path: Path,
+    ...options: ClientRequestArguments<InferClientApi<KnownClients[DefaultClient]>, Method, Path>
+  ) {
+    return this.use().request(method, path, ...options)
   }
 
-  get(path: string | URL, options?: RequestOptions) {
-    return this.use().get(path, options)
+  get<Path extends ClientPath<InferClientApi<KnownClients[DefaultClient]>, 'GET'>>(
+    path: Path,
+    ...options: ClientRequestArguments<InferClientApi<KnownClients[DefaultClient]>, 'GET', Path>
+  ) {
+    return this.use().get(path, ...options)
   }
 
-  post(path: string | URL, options?: RequestOptions) {
-    return this.use().post(path, options)
+  post<Path extends ClientPath<InferClientApi<KnownClients[DefaultClient]>, 'POST'>>(
+    path: Path,
+    ...options: ClientRequestArguments<InferClientApi<KnownClients[DefaultClient]>, 'POST', Path>
+  ) {
+    return this.use().post(path, ...options)
   }
 
-  put(path: string | URL, options?: RequestOptions) {
-    return this.use().put(path, options)
+  put<Path extends ClientPath<InferClientApi<KnownClients[DefaultClient]>, 'PUT'>>(
+    path: Path,
+    ...options: ClientRequestArguments<InferClientApi<KnownClients[DefaultClient]>, 'PUT', Path>
+  ) {
+    return this.use().put(path, ...options)
   }
 
-  patch(path: string | URL, options?: RequestOptions) {
-    return this.use().patch(path, options)
+  patch<Path extends ClientPath<InferClientApi<KnownClients[DefaultClient]>, 'PATCH'>>(
+    path: Path,
+    ...options: ClientRequestArguments<InferClientApi<KnownClients[DefaultClient]>, 'PATCH', Path>
+  ) {
+    return this.use().patch(path, ...options)
   }
 
-  delete(path: string | URL, options?: RequestOptions) {
-    return this.use().delete(path, options)
+  delete<Path extends ClientPath<InferClientApi<KnownClients[DefaultClient]>, 'DELETE'>>(
+    path: Path,
+    ...options: ClientRequestArguments<InferClientApi<KnownClients[DefaultClient]>, 'DELETE', Path>
+  ) {
+    return this.use().delete(path, ...options)
   }
 
   stream(path: string | URL, options?: StreamRequestOptions) {

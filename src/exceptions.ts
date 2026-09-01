@@ -4,7 +4,7 @@ import type { HttpResponse, HttpStreamResponse } from './response.js'
 export class HttpError extends Error {
   readonly name = 'HttpError'
 
-  constructor(readonly response: HttpResponse | HttpStreamResponse) {
+  constructor(readonly response: HttpResponse<unknown, unknown> | HttpStreamResponse) {
     super(`HTTP request failed with status ${response.status}`)
   }
 }

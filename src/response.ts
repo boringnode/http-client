@@ -7,7 +7,7 @@ interface ResponseInit {
 }
 
 /** A response whose body has already been consumed and can be read more than once. */
-export class HttpResponse {
+export class HttpResponse<SuccessBody = unknown, ErrorBody = unknown> {
   readonly status: number
   readonly headers: ResponseHeaders
   readonly #body: Uint8Array
@@ -22,7 +22,9 @@ export class HttpResponse {
     return new TextDecoder().decode(this.#body)
   }
 
-  json<T = unknown>(): T {
+  json(): SuccessBody | ErrorBody
+  json<T>(): T
+  json<T = SuccessBody | ErrorBody>(): T {
     return JSON.parse(this.text()) as T
   }
 
@@ -38,12 +40,13 @@ export class HttpResponse {
     return this.status >= 400
   }
 
-  throwIfFailed(): this {
+  throwIfFailed(): HttpResponse<SuccessBody, never> {
     if (this.failed()) {
       throw new HttpError(this)
     }
 
-    return this
+    // The status check above removes the error response body from the static view.
+    return this as unknown as HttpResponse<SuccessBody, never>
   }
 }
 
