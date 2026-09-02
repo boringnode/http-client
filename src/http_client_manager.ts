@@ -1,4 +1,11 @@
-import { HttpClient } from './http_client.js'
+import { HttpClient, httpClientDispatcher } from './http_client.js'
+import {
+  createHttpClientFake,
+  httpClientFakeDispatcher,
+  type HttpClientFake,
+  type HttpClientFakeController,
+} from './http_client_fake.js'
+import type { Dispatcher } from 'undici'
 import type { ClientPath, ClientRequestArguments, InferClientApi } from './openapi.js'
 import type {
   HttpClientManagerOptions,
@@ -18,6 +25,9 @@ export class HttpClientManager<
 > {
   readonly #config: HttpClientManagerOptions<KnownClients, DefaultClient>
   #clients: Partial<ManagedClients<KnownClients>> = {}
+  #fake?: HttpClientFakeController<KnownClients>
+  #restoringFake?: HttpClientFakeController<KnownClients>
+  #fakeRestoration?: Promise<void>
 
   constructor(config: HttpClientManagerOptions<KnownClients, DefaultClient>) {
     this.#config = config
@@ -43,11 +53,67 @@ export class HttpClientManager<
       throw new Error(`Cannot create HTTP client. Client "${String(clientName)}" is not defined`)
     }
 
-    const client = new HttpClient<InferClientApi<KnownClients[typeof clientName]>>(
-      this.#config.clients[clientName]
-    )
+    const options = this.#config.clients[clientName]
+    const client = new HttpClient<InferClientApi<KnownClients[typeof clientName]>>({
+      ...options,
+      dispatcher: this.#fake
+        ? this.#fake[httpClientFakeDispatcher](String(clientName) as keyof KnownClients & string)
+        : options.dispatcher,
+    })
     this.#clients[clientName] = client
     return client
+  }
+
+  /** Replace managed clients with isolated in-memory HTTP transports. */
+  fake(): HttpClientFake<KnownClients> {
+    if (this.#fake || this.#fakeRestoration) {
+      throw new Error('Cannot fake HTTP clients. A fake is already active or being restored')
+    }
+
+    const clients = this.#clients
+    this.#clients = { ...clients }
+    const originalDispatchers = new Map<keyof KnownClients, Dispatcher>()
+
+    const fake = createHttpClientFake(this.#config.clients, (restoration) => {
+      if (this.#fake === fake) {
+        for (const [clientName, dispatcher] of originalDispatchers) {
+          clients[clientName]?.[httpClientDispatcher](dispatcher)
+        }
+        this.#fake = undefined
+        this.#restoringFake = fake
+        this.#fakeRestoration = restoration
+        this.#clients = clients
+
+        const clearRestoration = () => {
+          if (this.#fakeRestoration === restoration) {
+            this.#restoringFake = undefined
+            this.#fakeRestoration = undefined
+          }
+        }
+        void restoration.then(clearRestoration, clearRestoration)
+      }
+    })
+
+    for (const [clientName, client] of Object.entries(clients) as [
+      keyof KnownClients,
+      HttpClient,
+    ][]) {
+      const dispatcher = fake[httpClientFakeDispatcher](
+        String(clientName) as keyof KnownClients & string
+      )
+      originalDispatchers.set(clientName, client[httpClientDispatcher](dispatcher))
+    }
+    this.#fake = fake
+    return fake
+  }
+
+  /** Restore the managed clients that were active before fake mode. */
+  async restore(): Promise<void> {
+    if (this.#fake) {
+      await this.#fake.restore()
+    } else {
+      await this.#fakeRestoration
+    }
   }
 
   request<
@@ -101,12 +167,19 @@ export class HttpClientManager<
   }
 
   async close(): Promise<void> {
+    await this.restore()
     const clients = Object.values(this.#clients) as HttpClient[]
     this.#clients = {}
     await Promise.all(clients.map((client) => client.close()))
   }
 
   async destroy(error?: Error): Promise<void> {
+    const fake = this.#fake ?? this.#restoringFake
+    if (fake) {
+      await fake.destroy(error)
+    } else {
+      await this.#fakeRestoration
+    }
     const clients = Object.values(this.#clients) as HttpClient[]
     this.#clients = {}
     await Promise.all(clients.map((client) => client.destroy(error)))

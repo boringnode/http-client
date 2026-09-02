@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['./index.ts', './src/types/*.ts'],
+  entry: ['./index.ts', './testing.ts', './src/types/*.ts'],
   outDir: './build',
   clean: true,
   format: 'esm',

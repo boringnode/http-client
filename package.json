@@ -9,6 +9,7 @@
   ],
   "exports": {
     ".": "./build/index.js",
+    "./testing": "./build/testing.js",
     "./types": "./build/src/types/main.js"
   },
   "scripts": {

@@ -19,40 +19,55 @@ import type {
 
 const DEFAULT_MAX_RESPONSE_SIZE = 10 * 1024 * 1024
 const DEFAULT_MAX_REDIRECTS = 5
+const inheritedDispatcher = Symbol('inheritedDispatcher')
 
-interface DispatcherReference {
+interface DispatcherSlot {
   dispatcher: Dispatcher
-  owned: boolean
+  redirectDispatchers: Map<number, Dispatcher>
 }
+
+interface InternalHttpClientOptions extends HttpClientOptions {
+  [inheritedDispatcher]?: DispatcherSlot
+}
+
+export const httpClientDispatcher = Symbol('httpClientDispatcher')
 
 /** A reusable HTTP client backed by one long-lived Undici dispatcher. */
 export class HttpClient<Api = never> {
   readonly #options: Omit<HttpClientOptions, 'dispatcher' | 'transport'>
-  readonly #dispatcher: DispatcherReference
-  readonly #redirectDispatchers = new Map<number, Dispatcher>()
+  readonly #dispatcher: DispatcherSlot
+  readonly #ownedDispatcher?: Dispatcher
   #disposed = false
 
   constructor(options: HttpClientOptions = {}) {
     this.#options = normalizeOptions(options)
+    const inherited = (options as InternalHttpClientOptions)[inheritedDispatcher]
 
-    if (typeof options.dispatcher === 'function') {
-      this.#dispatcher = { dispatcher: options.dispatcher(), owned: true }
+    if (inherited) {
+      this.#dispatcher = inherited
+    } else if (typeof options.dispatcher === 'function') {
+      const dispatcher = options.dispatcher()
+      this.#dispatcher = { dispatcher, redirectDispatchers: new Map() }
+      this.#ownedDispatcher = dispatcher
     } else if (options.dispatcher) {
-      this.#dispatcher = { dispatcher: options.dispatcher, owned: false }
+      this.#dispatcher = { dispatcher: options.dispatcher, redirectDispatchers: new Map() }
     } else {
-      this.#dispatcher = { dispatcher: new Agent(options.transport), owned: true }
+      const dispatcher = new Agent(options.transport)
+      this.#dispatcher = { dispatcher, redirectDispatchers: new Map() }
+      this.#ownedDispatcher = dispatcher
     }
   }
 
   /** Create a client with merged defaults that borrows this client's dispatcher. */
   withOptions(options: Omit<HttpClientOptions, 'dispatcher' | 'transport'>): HttpClient<Api> {
-    const client = new HttpClient<Api>({
+    const clientOptions: InternalHttpClientOptions = {
       ...this.#options,
       ...options,
       headers: mergeHeaders(this.#options.headers, options.headers),
       query: { ...this.#options.query, ...options.query },
-      dispatcher: this.#dispatcher.dispatcher,
-    })
+      [inheritedDispatcher]: this.#dispatcher,
+    }
+    const client = new HttpClient<Api>(clientOptions)
 
     return client
   }
@@ -153,18 +168,27 @@ export class HttpClient<Api = never> {
 
   /** Gracefully close this client's dispatcher when the client owns it. */
   async close(): Promise<void> {
-    if (this.#dispatcher.owned && !this.#disposed) {
+    if (this.#ownedDispatcher && !this.#disposed) {
       this.#disposed = true
-      await this.#dispatcher.dispatcher.close()
+      await this.#ownedDispatcher.close()
     }
   }
 
   /** Abort requests and destroy this client's dispatcher when the client owns it. */
   async destroy(error?: Error): Promise<void> {
-    if (this.#dispatcher.owned && !this.#disposed) {
+    if (this.#ownedDispatcher && !this.#disposed) {
       this.#disposed = true
-      await this.#dispatcher.dispatcher.destroy(error ?? null)
+      await this.#ownedDispatcher.destroy(error ?? null)
     }
+  }
+
+  [httpClientDispatcher](dispatcher?: Dispatcher): Dispatcher {
+    const current = this.#dispatcher.dispatcher
+    if (dispatcher && dispatcher !== current) {
+      this.#dispatcher.dispatcher = dispatcher
+      this.#dispatcher.redirectDispatchers.clear()
+    }
+    return current
   }
 
   async #dispatch(method: HttpMethod, path: string | URL, options: RequestOptions) {
@@ -216,12 +240,12 @@ export class HttpClient<Api = never> {
       return this.#dispatcher.dispatcher
     }
 
-    let dispatcher = this.#redirectDispatchers.get(maxRedirects)
+    let dispatcher = this.#dispatcher.redirectDispatchers.get(maxRedirects)
     if (!dispatcher) {
       dispatcher = this.#dispatcher.dispatcher.compose(
         interceptors.redirect({ maxRedirections: maxRedirects })
       )
-      this.#redirectDispatchers.set(maxRedirects, dispatcher)
+      this.#dispatcher.redirectDispatchers.set(maxRedirects, dispatcher)
     }
 
     return dispatcher
