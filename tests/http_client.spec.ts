@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { test } from '@japa/runner'
-import { Agent, errors as undiciErrors } from 'undici'
+import { Agent, Dispatcher, errors as undiciErrors } from 'undici'
 import { HttpClient } from '../src/http_client.js'
 import { HttpError, ResponseTooLargeError } from '../src/exceptions.js'
 
@@ -173,6 +173,74 @@ test.group('HttpClient', () => {
       await assert.rejects(() => client.get('/'), ResponseTooLargeError)
     } finally {
       await client.close()
+      await server.close()
+    }
+  })
+
+  test('buffers custom dispatcher slices without including their backing bytes', async ({
+    assert,
+  }) => {
+    const chunks = [Buffer.from('!one!').subarray(1, 4), Buffer.from('!two!').subarray(1, 4)]
+    class SliceDispatcher extends Dispatcher {
+      dispatch(_options: Dispatcher.DispatchOptions, handler: Dispatcher.DispatchHandler) {
+        const controller: Dispatcher.DispatchController = {
+          aborted: false,
+          paused: false,
+          reason: null,
+          abort() {},
+          pause() {},
+          resume() {},
+        }
+        handler.onRequestStart?.(controller, {})
+        handler.onResponseStart?.(controller, 200, {}, 'OK')
+        for (const chunk of chunks) handler.onResponseData?.(controller, chunk)
+        handler.onResponseEnd?.(controller, {})
+        return true
+      }
+    }
+    const client = new HttpClient({ dispatcher: new SliceDispatcher(), maxResponseSize: 6 })
+    const response = await client.get('http://localhost/')
+    assert.equal(response.text(), 'onetwo')
+    chunks.forEach((chunk) => chunk.fill(0))
+    assert.equal(response.text(), 'onetwo')
+  })
+
+  test('counts encoded string chunks in bytes at the response limit', async ({ assert }) => {
+    const server = await startServer((_request, response) => {
+      response.end('é🙂')
+    })
+    const agent = new Agent()
+    const request = agent.request.bind(agent)
+    Object.defineProperty(agent, 'request', {
+      value: async (options: Dispatcher.RequestOptions) => {
+        const response = await request(options)
+        response.body.setEncoding('utf8')
+        return response
+      },
+    })
+    const client = new HttpClient({ dispatcher: agent, maxRedirects: 0, maxResponseSize: 6 })
+    try {
+      assert.equal((await client.get(server.baseUrl)).text(), 'é🙂')
+      await assert.rejects(
+        () => client.withOptions({ maxResponseSize: 5 }).get(server.baseUrl),
+        ResponseTooLargeError
+      )
+    } finally {
+      await agent.close()
+      await server.close()
+    }
+  })
+
+  test('rejects a body failure after receiving a chunk', async ({ assert }) => {
+    const server = await startServer((_request, response) => {
+      response.write('partial')
+      setTimeout(() => response.destroy(), 20)
+    })
+    const client = new HttpClient()
+    try {
+      await assert.rejects(() => client.get(server.baseUrl), undiciErrors.SocketError)
+    } finally {
+      await client.destroy()
       await server.close()
     }
   })

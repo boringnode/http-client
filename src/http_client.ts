@@ -87,7 +87,7 @@ export class HttpClient<Api = never> {
 
     try {
       for await (const chunk of response.body) {
-        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : new Uint8Array(chunk)
+        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
         size += bytes.byteLength
 
         if (size > limit) {
