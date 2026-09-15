@@ -1,55 +1,50 @@
 # @boringnode/http-client
 
-A small TypeScript HTTP client built on [Undici](https://undici.nodejs.org). It buffers normal
-responses so their connection can return to the pool, and keeps streaming explicit.
+<div align="center">
+
+[![typescript-image]][typescript-url]
+[![gh-workflow-image]][gh-workflow-url]
+[![npm-image]][npm-url]
+[![npm-download-image]][npm-download-url]
+[![license-image]][license-url]
+
+</div>
+
+A small HTTP client for Node.js built on [Undici](https://undici.nodejs.org). It provides reusable
+client configuration, named clients, typed OpenAPI requests, and an in-memory transport for tests.
 
 ## Installation
 
-```sh
+```bash
 npm install @boringnode/http-client
 ```
 
-## Why not use `fetch`?
+## Features
 
-Node.js `fetch` is powered by Undici and remains the best choice for isolated requests or code that
-needs the Web Fetch API. This package uses Undici's lower-level dispatcher API to add application
-conventions without changing its global dispatcher.
+- **Named clients**: Configure several APIs and access them through `HttpClientManager`
+- **Client defaults**: Reuse base URLs, headers, query parameters, and timeouts
+- **Typed OpenAPI requests**: Infer paths, parameters, JSON bodies, and responses from an OpenAPI
+  `paths` type
+- **Buffered responses**: Read response bodies more than once with a configurable size limit
+- **Explicit streaming**: Stream large responses without buffering them in memory
+- **Derived clients**: Add request defaults while sharing the parent dispatcher's connection pool
+- **Request fakes**: Intercept requests and assert against them without network access
+- **Managed connections**: Configure Undici dispatchers and close owned connections cleanly
 
-```ts
+## Quick Start
+
+### Create a client
+
+```typescript
+import { HttpClient } from '@boringnode/http-client'
+
 const http = new HttpClient({
   baseUrl: 'https://api.example.com',
   headers: { authorization: `Bearer ${token}` },
   timeout: 10_000,
-  maxResponseSize: 5 * 1024 * 1024,
 })
 
-const response = await http.get('/users', { query: { page: 1 } })
-response.throwIfFailed()
-const users = response.json<User[]>()
-```
-
-Compared with `fetch`, the package provides:
-
-- reusable client defaults for base URLs, headers, query parameters, and timeouts;
-- named clients through `HttpClientManager`;
-- immutable derived clients that share the same dispatcher;
-- buffered, repeatable response readers with a maximum body size;
-- explicit HTTP failure handling through `failed()` and `throwIfFailed()`;
-- an explicit streaming API with documented body ownership;
-- per-client dispatcher and connection settings with owned lifecycle management.
-
-`fetch` already pools connections through Undici, follows redirects, supports streaming, and works
-with `AbortSignal`. This package does not replace those capabilities. It gives them a reusable,
-typed client configuration and lifecycle for applications that make more than occasional requests.
-
-## Basic usage
-
-```ts
-import { HttpClient } from '@boringnode/http-client'
-
-const http = new HttpClient()
-
-const response = await http.get('https://example.com/users', {
+const response = await http.get('/users', {
   query: { page: 1 },
 })
 
@@ -62,9 +57,54 @@ await http.close()
 HTTP 4xx and 5xx statuses remain normal responses. Network errors and timeouts reject the request.
 Call `throwIfFailed()` when a non-success status should throw.
 
-## Configured and named clients
+### Configure named clients
 
-```ts
+```typescript
+import { HttpClientManager } from '@boringnode/http-client'
+
+const http = new HttpClientManager({
+  default: 'github',
+  clients: {
+    github: {
+      baseUrl: 'https://api.github.com',
+      headers: { authorization: `Bearer ${token}` },
+      timeout: 10_000,
+    },
+  },
+})
+
+const response = await http.get('/repos/boringnode/http-client')
+const repository = response.throwIfFailed().json<Repository>()
+
+await http.close()
+```
+
+`use(name?)` creates each named client on first use and caches it. The manager also forwards
+`request`, `get`, `post`, `put`, `patch`, `delete`, and `stream` to its default client.
+
+## Why Not Use `fetch`?
+
+Node.js `fetch` is powered by Undici and remains the best choice for isolated requests or code that
+needs the Web Fetch API. This package uses Undici's lower-level dispatcher API to add application
+conventions without changing its global dispatcher.
+
+Compared with `fetch`, the package provides:
+
+- reusable client defaults for base URLs, headers, query parameters, and timeouts
+- named clients through `HttpClientManager`
+- immutable derived clients that share the same dispatcher
+- buffered, repeatable response readers with a maximum body size
+- explicit HTTP failure handling through `failed()` and `throwIfFailed()`
+- an explicit streaming API with documented body ownership
+- per-client dispatcher and connection settings with owned lifecycle management
+
+`fetch` already pools connections through Undici, follows redirects, supports streaming, and works
+with `AbortSignal`. This package does not replace those capabilities. It gives them a reusable,
+typed client configuration and lifecycle for applications that make more than occasional requests.
+
+## Client Configuration
+
+```typescript
 import { HttpClientManager } from '@boringnode/http-client'
 
 const http = new HttpClientManager({
@@ -93,7 +133,7 @@ await http.close()
 
 The generic request method takes the HTTP method first:
 
-```ts
+```typescript
 await http.request('OPTIONS', '/health')
 ```
 
@@ -104,7 +144,7 @@ affects clients obtained before `fake()` and clients created from them with `wit
 network connections are disabled while the fake is active, so every request needs a matching
 interceptor. Fake scopes cannot overlap.
 
-```ts
+```typescript
 test('creates a repository', async () => {
   await using fake = http.fake()
 
@@ -143,19 +183,19 @@ configured interceptor was consumed.
 transports. Call `await fake.restore()` or `await http.restore()` when explicit cleanup is more
 convenient.
 
-## OpenAPI types
+## OpenAPI Types
 
 The client can use a `paths` type generated by
 [`openapi-typescript`](https://github.com/openapi-ts/openapi-typescript). The generated types remain
 type-only and add no runtime dependency.
 
-```sh
+```bash
 npx openapi-typescript ./github.openapi.yaml -o ./github.openapi.ts
 ```
 
 Attach the generated type to a named client with `defineHttpClient`:
 
-```ts
+```typescript
 import type { paths as GitHubApi } from './github.openapi.js'
 import { defineHttpClient, HttpClientManager } from '@boringnode/http-client'
 
@@ -185,11 +225,11 @@ OpenAPI types provide compile-time checks only. They do not validate a server re
 Path interpolation currently implements the common `{parameter}` form, and request bodies are typed
 when the operation declares a JSON media type.
 
-## Request bodies
+## Request Bodies
 
 Use `json` for JSON and `body` for strings, bytes, form data, or Node.js readable streams.
 
-```ts
+```typescript
 await http.use('github').post('/repos/boringnode/example/issues', {
   json: { title: 'Connection failed' },
 })
@@ -202,7 +242,7 @@ await http.use('github').put('/upload', {
 
 The buffered response API is synchronous after the request resolves:
 
-```ts
+```typescript
 response.status
 response.headers
 response.header('content-type')
@@ -216,12 +256,12 @@ response.throwIfFailed()
 The default response limit is 10 MiB. Set `maxResponseSize` on a client or derived client to change
 it. An oversized response throws `errors.ResponseTooLargeError` and discards its connection.
 
-## Derived clients
+## Derived Clients
 
 `withOptions` creates an immutable derived client. Headers and query values merge with the parent,
 and the derived client borrows the same dispatcher.
 
-```ts
+```typescript
 const authenticated = httpClient.withOptions({
   headers: { authorization: `Bearer ${token}` },
 })
@@ -235,13 +275,13 @@ When `baseUrl` is configured, default headers and query parameters apply only to
 same origin. Request-specific options still apply to any URL. This prevents credentials configured
 for one API from being sent to another origin.
 
-## Timeouts and redirects
+## Timeouts and Redirects
 
 `timeout` limits the total request duration. `headersTimeout` limits the time spent waiting for
 complete response headers, and `bodyTimeout` limits inactivity between body chunks. Set any timeout
 to `0` to disable it.
 
-```ts
+```typescript
 const http = new HttpClient({
   timeout: 30_000,
   headersTimeout: 10_000,
@@ -258,7 +298,7 @@ change the limit, or set it to `0` to receive redirect responses unchanged. Undi
 `stream` skips the response limit and returns Undici's readable body. The caller owns that body and
 must consume, dump, or destroy it so the connection can be reused.
 
-```ts
+```typescript
 const response = await httpClient.stream('/archive')
 
 for await (const chunk of response.body) {
@@ -268,12 +308,12 @@ for await (const chunk of response.body) {
 
 Pass `method` and the normal request options when streaming a non-GET request.
 
-## Dispatchers and lifecycle
+## Dispatchers and Lifecycle
 
 Each client creates one long-lived Undici `Agent` by default. The package never changes Undici's
 global dispatcher and never creates a dispatcher per request.
 
-```ts
+```typescript
 import { Agent } from 'undici'
 
 const borrowed = new HttpClient({ dispatcher: existingDispatcher })
@@ -289,3 +329,14 @@ requests, while `destroy()` aborts them.
 
 The `transport` option exposes common Agent connection settings. Inject a dispatcher for more
 specialized Undici setups.
+
+[gh-workflow-image]: https://img.shields.io/github/actions/workflow/status/boringnode/http-client/checks.yml?branch=main&style=for-the-badge
+[gh-workflow-url]: https://github.com/boringnode/http-client/actions/workflows/checks.yml
+[npm-image]: https://img.shields.io/npm/v/@boringnode/http-client.svg?style=for-the-badge&logo=npm
+[npm-url]: https://www.npmjs.com/package/@boringnode/http-client
+[npm-download-image]: https://img.shields.io/npm/dm/@boringnode/http-client?style=for-the-badge
+[npm-download-url]: https://www.npmjs.com/package/@boringnode/http-client
+[typescript-image]: https://img.shields.io/badge/Typescript-294E80.svg?style=for-the-badge&logo=typescript
+[typescript-url]: https://www.typescriptlang.org
+[license-image]: https://img.shields.io/npm/l/@boringnode/http-client?color=blueviolet&style=for-the-badge
+[license-url]: LICENSE.md
